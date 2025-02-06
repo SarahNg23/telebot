@@ -1,171 +1,168 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+import os
+import requests
+import asyncio
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
+from openai import OpenAI  # Sử dụng client mới
 
-# C extensions
-*.so
+# Fix lỗi event loop cho Jupyter Notebook
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+# Load environment variables
+load_dotenv("bot.env")
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+# Configuration
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+CMC_API_KEY = os.getenv('COINMARKETCAP_API_KEY')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# Khởi tạo OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
+# Endpoints
+CMC_TOP10_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+CMC_SINGLE_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest"
 
-# Translations
-*.mo
-*.pot
+# Command: /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Top 10 Cryptos", callback_data='top10')],
+        [InlineKeyboardButton("BTC Analysis", callback_data='btc')],
+        [InlineKeyboardButton("ETH Analysis", callback_data='eth')],
+        [InlineKeyboardButton("Custom Analysis", callback_data='custom')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Chọn loại phân tích bạn muốn:",
+        reply_markup=reply_markup
+    )
 
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
+# Handle button clicks
+async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'top10':
+        analysis = await get_top10()
+    elif query.data == 'btc':
+        analysis = await get_analysis('BTC')
+    elif query.data == 'eth':
+        analysis = await get_analysis('ETH')
+    elif query.data == 'custom':
+        analysis = "Ghi mã hoặc tên crypto bạn muốn phân tích (ví dụ: BTC, ETH, SOL)."
+        await query.edit_message_text(text=analysis)
+        return
+    
+    await query.edit_message_text(text=analysis)
 
-# Flask stuff:
-instance/
-.webassets-cache
+# Fetch top 10 cryptocurrencies
+async def get_top10():
+    parameters = {
+        "start": "1",
+        "limit": "10",
+        "convert": "USD"
+    }
+    headers = {
+        "Accepts": "application/json",
+        "X-CMC_PRO_API_KEY": CMC_API_KEY
+    }
 
-# Scrapy stuff:
-.scrapy
+    try:
+        response = requests.get(CMC_TOP10_URL, headers=headers, params=parameters)
+        data = response.json()
+        
+        if 'data' not in data:
+            return "❌ Lỗi: Không tìm thấy dữ liệu từ API."
+        
+        analysis = "📊 Top 10 Cryptocurrencies:\n\n"
+        for crypto in data['data']:
+            change_24h = crypto['quote']['USD']['percent_change_24h']
+            change_emoji = "🟢" if change_24h >= 0 else "🔴"
+            
+            analysis += (
+                f"{crypto['symbol']}: ${crypto['quote']['USD']['price']:,.2f}\n"
+                f"  24h Change: {change_emoji} {change_24h:.2f}%\n"
+                f"  Market Cap: ${crypto['quote']['USD']['market_cap']:,.0f}\n"
+                f"  Volume 24h: ${crypto['quote']['USD']['volume_24h']:,.0f}\n\n"
+            )
+        return analysis
+    
+    except Exception as e:
+        return f"❌ Lỗi khi lấy dữ liệu: {str(e)}"
 
-# Sphinx documentation
-docs/_build/
+async def get_analysis(symbol: str):
+    parameters = {
+        "symbol": symbol,
+        "convert": "USD"
+    }
+    headers = {
+        "Accepts": "application/json",
+        "X-CMC_PRO_API_KEY": CMC_API_KEY
+    }
 
-# PyBuilder
-.pybuilder/
-target/
+    try:
+        response = requests.get(CMC_SINGLE_URL, headers=headers, params=parameters)
+        data = response.json()
 
-# Jupyter Notebook
-.ipynb_checkpoints
+        if "data" not in data or symbol not in data["data"]:
+            return f"❌ Không tìm thấy dữ liệu cho {symbol}."
 
-# IPython
-profile_default/
-ipython_config.py
+        crypto = data["data"][symbol][0]
+        price = crypto['quote']['USD']['price']
+        change_24h = crypto['quote']['USD']['percent_change_24h']
+        market_cap = crypto['quote']['USD']['market_cap']
+        volume_24h = crypto['quote']['USD']['volume_24h']
 
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
+        # Phân tích bằng ChatGPT
+        prompt = (
+            f"Phân tích crypto {symbol} với các thông tin sau:\n"
+            f"- Giá hiện tại: ${price:,.2f}\n"
+            f"- Thay đổi 24h: {change_24h:.2f}%\n"
+            f"- Vốn hóa thị trường: ${market_cap:,.0f}\n"
+            f"- Khối lượng 24h: ${volume_24h:,.0f}\n\n"
+            f"Đưa ra phân tích kỹ thuật và dự đoán ngắn hạn."
+        )
 
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
+        # Sử dụng client mới
+        chatgpt_response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
+        analysis = chatgpt_response.choices[0].message.content
+        return f"📈 Phân tích {symbol}:\n\n{analysis}"
 
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
+    except Exception as e:
+        return f"❌ Lỗi khi lấy dữ liệu: {str(e)}"
 
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
+# Handle custom crypto analysis
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    symbol = update.message.text.upper()
+    analysis = await get_analysis(symbol)
+    await update.message.reply_text(analysis)
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
+def main():
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CallbackQueryHandler(handle_button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("Bot is running...")
+    application.run_polling()
 
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# PyPI configuration file
-.pypirc
+if __name__ == '__main__':
+    main()
